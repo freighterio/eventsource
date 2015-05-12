@@ -41,7 +41,7 @@ func Subscribe(url, lastEventId string, tr *http.Transport) (*Stream, error) {
 	stream := &Stream{
 		url:         url,
 		lastEventId: lastEventId,
-		retry:       (time.Millisecond * 3000),
+		retry:       (time.Millisecond * 1000),
 		Events:      make(chan Event),
 		Errors:      make(chan error),
 	}
