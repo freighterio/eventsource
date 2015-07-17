@@ -17,6 +17,7 @@ type Stream struct {
 	url         string
 	lastEventId string
 	retry       time.Duration
+	stop        bool
 	// Events emits the events received by the stream
 	Events chan Event
 	// Errors emits any errors encountered while reading events from the stream.
@@ -41,6 +42,7 @@ func Subscribe(url, lastEventId string, tr *http.Transport) (*Stream, error) {
 	stream := &Stream{
 		url:         url,
 		lastEventId: lastEventId,
+		stop:        false,
 		retry:       (time.Millisecond * 1000),
 		Events:      make(chan Event),
 		Errors:      make(chan error),
@@ -55,6 +57,11 @@ func Subscribe(url, lastEventId string, tr *http.Transport) (*Stream, error) {
 	}
 	go stream.stream(r)
 	return stream, nil
+}
+
+func (stream *Stream) Stop() {
+	// TODO: This is not ideal.  Use a channel instead.
+	stream.stop = true
 }
 
 func (stream *Stream) connect() (r io.ReadCloser, err error) {
@@ -83,9 +90,20 @@ func (stream *Stream) connect() (r io.ReadCloser, err error) {
 }
 
 func (stream *Stream) stream(r io.ReadCloser) {
-	defer r.Close()
+	defer func() {
+		r.Close()
+		if stream.stop {
+			close(stream.Errors)
+			close(stream.Events)
+		}
+	}()
+
 	dec := newDecoder(r)
 	for {
+		if stream.stop {
+			return
+		}
+
 		ev, err := dec.Decode()
 
 		if err != nil {
@@ -104,6 +122,10 @@ func (stream *Stream) stream(r io.ReadCloser) {
 	}
 	backoff := stream.retry
 	for {
+		if stream.stop {
+			return
+		}
+
 		log.Printf("Reconnecting in %0.4f secs", backoff.Seconds())
 		time.Sleep(backoff)
 
