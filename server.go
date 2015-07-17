@@ -9,6 +9,7 @@ type subscription struct {
 	channel     string
 	lastEventId string
 	out         chan Event
+	controls    chan interface{}
 }
 
 type outbound struct {
@@ -19,6 +20,13 @@ type registration struct {
 	channel    string
 	repository Repository
 }
+type control struct {
+	channels []string
+	payload  interface{}
+}
+
+type disconnectEvent struct {
+}
 
 type Server struct {
 	AllowCORS     bool // Enable all handlers to be accessible from any origin
@@ -28,6 +36,7 @@ type Server struct {
 	pub           chan *outbound
 	subs          chan *subscription
 	unregister    chan *subscription
+	controls      chan *control
 	quit          chan bool
 }
 
@@ -38,6 +47,7 @@ func NewServer() *Server {
 		pub:           make(chan *outbound),
 		subs:          make(chan *subscription),
 		unregister:    make(chan *subscription, 2),
+		controls:      make(chan *control),
 		quit:          make(chan bool),
 		BufferSize:    128,
 	}
@@ -51,7 +61,7 @@ func (srv *Server) Close() {
 }
 
 // Create a new handler for serving a specified channel
-func (srv *Server) Handler(channelConnectedCallback func(http.ResponseWriter, *http.Request) (string), channelDisconnectedCallback func(string)) http.HandlerFunc {
+func (srv *Server) Handler(channelConnectedCallback func(http.ResponseWriter, *http.Request) string, channelDisconnectedCallback func(string)) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		channel := channelConnectedCallback(w, req)
 
@@ -73,6 +83,7 @@ func (srv *Server) Handler(channelConnectedCallback func(http.ResponseWriter, *h
 			channel:     channel,
 			lastEventId: req.Header.Get("Last-Event-ID"),
 			out:         make(chan Event, srv.BufferSize),
+			controls:    make(chan interface{}, 0),
 		}
 		srv.subs <- sub
 		flusher := w.(http.Flusher)
@@ -81,6 +92,14 @@ func (srv *Server) Handler(channelConnectedCallback func(http.ResponseWriter, *h
 		enc := newEncoder(w)
 		for {
 			select {
+			case ev := <-sub.controls:
+				switch t := ev.(type) {
+				default:
+					log.Printf("Unnexpected control event type: %T\n", t)
+				case *disconnectEvent:
+					log.Printf("Disconnecting host on channel: %s\n", channel)
+					return
+				}
 			case <-notifier.CloseNotify():
 				channelDisconnectedCallback(channel)
 				srv.unregister <- sub
@@ -116,6 +135,13 @@ func (srv *Server) Publish(channels []string, ev Event) {
 	}
 }
 
+func (srv *Server) Disconnect(channels []string) {
+	srv.controls <- &control{
+		channels: channels,
+		payload:  &disconnectEvent{},
+	}
+}
+
 func replay(repo Repository, sub *subscription) {
 	for ev := range repo.Replay(sub.channel, sub.lastEventId) {
 		sub.out <- ev
@@ -141,6 +167,14 @@ func (srv *Server) run() {
 						close(s.out)
 					}
 
+				}
+			}
+		case ctrl := <-srv.controls:
+			for _, c := range ctrl.channels {
+				if channelSubs, ok := subs[c]; ok {
+					for sub := range channelSubs {
+						sub.controls <- ctrl.payload
+					}
 				}
 			}
 		case sub := <-srv.subs:
