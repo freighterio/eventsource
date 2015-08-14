@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
-	"log"
 	"net/http"
 	"time"
 )
@@ -17,7 +16,7 @@ type Stream struct {
 	url         string
 	lastEventId string
 	retry       time.Duration
-	stop        bool
+	stopCh      chan struct{}
 	// Events emits the events received by the stream
 	Events chan Event
 	// Errors emits any errors encountered while reading events from the stream.
@@ -42,7 +41,7 @@ func Subscribe(url, lastEventId string, tr *http.Transport) (*Stream, error) {
 	stream := &Stream{
 		url:         url,
 		lastEventId: lastEventId,
-		stop:        false,
+		stopCh:      make(chan struct{}),
 		retry:       (time.Millisecond * 1000),
 		Events:      make(chan Event),
 		Errors:      make(chan error),
@@ -60,8 +59,7 @@ func Subscribe(url, lastEventId string, tr *http.Transport) (*Stream, error) {
 }
 
 func (stream *Stream) Stop() {
-	// TODO: This is not ideal.  Use a channel instead.
-	stream.stop = true
+	close(stream.stopCh)
 }
 
 func (stream *Stream) connect() (r io.ReadCloser, err error) {
@@ -90,44 +88,59 @@ func (stream *Stream) connect() (r io.ReadCloser, err error) {
 }
 
 func (stream *Stream) stream(r io.ReadCloser) {
+	stop := false
+
 	defer func() {
 		r.Close()
-		if stream.stop {
+		if stop {
 			close(stream.Errors)
 			close(stream.Events)
 		}
 	}()
 
 	dec := newDecoder(r)
+Stream:
 	for {
-		if stream.stop {
-			return
-		}
+		evCh := make(chan Event)
+		errCh := make(chan error)
 
-		ev, err := dec.Decode()
+		go func(evCh chan<- Event, errCh chan<- error) {
+			ev, err := dec.Decode()
+			if err != nil {
+				errCh <- err
+				return
+			}
+			evCh <- ev
+		}(evCh, errCh)
 
-		if err != nil {
+		select {
+		case ev := <-evCh:
+			pub := ev.(*publication)
+			if pub.Retry() > 0 {
+				stream.retry = time.Duration(pub.Retry()) * time.Millisecond
+			}
+			if len(pub.Id()) > 0 {
+				stream.lastEventId = pub.Id()
+			}
+			stream.Events <- ev
+		case err := <-errCh:
 			stream.Errors <- err
 			// respond to all errors by reconnecting and trying again
-			break
+			break Stream
+		case <-stream.stopCh:
+			stop = true
+			return
 		}
-		pub := ev.(*publication)
-		if pub.Retry() > 0 {
-			stream.retry = time.Duration(pub.Retry()) * time.Millisecond
-		}
-		if len(pub.Id()) > 0 {
-			stream.lastEventId = pub.Id()
-		}
-		stream.Events <- ev
 	}
 	backoff := stream.retry
 	for {
-		if stream.stop {
+		select {
+		case <-time.After(backoff):
+			break
+		case <-stream.stopCh:
+			stop = true
 			return
 		}
-
-		log.Printf("Reconnecting in %0.4f secs", backoff.Seconds())
-		time.Sleep(backoff)
 
 		// NOTE: because of the defer we're opening the new connection
 		// before closing the old one. Shouldn't be a problem in practice,
