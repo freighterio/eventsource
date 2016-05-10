@@ -54,8 +54,15 @@ func Subscribe(url, lastEventId string, tr *http.Transport) (*Stream, error) {
 	if err != nil {
 		return nil, err
 	}
+	go stream.cleanupOnStop()
 	go stream.stream(r)
 	return stream, nil
+}
+
+func (stream *Stream) cleanupOnStop() {
+	<-stream.stopCh
+	close(stream.Errors)
+	close(stream.Events)
 }
 
 func (stream *Stream) Stop() {
@@ -88,16 +95,7 @@ func (stream *Stream) connect() (r io.ReadCloser, err error) {
 }
 
 func (stream *Stream) stream(r io.ReadCloser) {
-	stop := false
-
-	defer func() {
-		r.Close()
-		if stop {
-			close(stream.Errors)
-			close(stream.Events)
-		}
-	}()
-
+	defer r.Close()
 	dec := newDecoder(r)
 Stream:
 	for {
@@ -128,7 +126,6 @@ Stream:
 			// respond to all errors by reconnecting and trying again
 			break Stream
 		case <-stream.stopCh:
-			stop = true
 			return
 		}
 	}
@@ -138,7 +135,6 @@ Stream:
 		case <-time.After(backoff):
 			break
 		case <-stream.stopCh:
-			stop = true
 			return
 		}
 
