@@ -122,8 +122,8 @@ func (stream *Stream) stream(r io.ReadCloser) {
 	dec := NewDecoder(r)
 Stream:
 	for {
-		evCh := make(chan Event)
-		errCh := make(chan error)
+		evCh := make(chan Event, 1)
+		errCh := make(chan error, 1)
 
 		go func(evCh chan<- Event, errCh chan<- error) {
 			ev, err := dec.Decode()
