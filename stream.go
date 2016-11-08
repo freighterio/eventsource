@@ -73,7 +73,6 @@ func SubscribeWith(lastEventId string, client *http.Client, request *http.Reques
 	if err != nil {
 		return nil, err
 	}
-	go stream.cleanupOnStop()
 	go stream.stream(r)
 	return stream, nil
 }
@@ -119,6 +118,9 @@ func (stream *Stream) connect() (r io.ReadCloser, err error) {
 
 func (stream *Stream) stream(r io.ReadCloser) {
 	defer r.Close()
+	defer close(stream.Errors)
+	defer close(stream.Events)
+
 	dec := NewDecoder(r)
 Stream:
 	for {
@@ -179,10 +181,4 @@ Stream:
 			backoff *= 2
 		}
 	}
-}
-
-func (stream *Stream) cleanupOnStop() {
-	<-stream.stopCh
-	close(stream.Errors)
-	close(stream.Events)
 }
