@@ -117,12 +117,25 @@ func (stream *Stream) connect() (r io.ReadCloser, err error) {
 }
 
 func (stream *Stream) stream(r io.ReadCloser) {
-	defer r.Close()
 	defer close(stream.Errors)
 	defer close(stream.Events)
 
+	for {
+		err := stream.readFromStream(r)
+		if err == nil {
+			return
+		}
+		r = stream.reconnectWithBackoff()
+		if r == nil {
+			return
+		}
+	}
+}
+
+func (stream *Stream) readFromStream(r io.ReadCloser) error {
+	defer r.Close()
+
 	dec := NewDecoder(r)
-Stream:
 	for {
 		evCh := make(chan Event, 1)
 		errCh := make(chan error, 1)
@@ -149,30 +162,29 @@ Stream:
 		case err := <-errCh:
 			stream.Errors <- err
 			// respond to all errors by reconnecting and trying again
-			break Stream
+			return err
 		case <-stream.stopCh:
-			return
+			return nil
 		}
 	}
+}
+
+func (stream *Stream) reconnectWithBackoff() io.ReadCloser {
 	backoff := stream.retry
 	for {
 		select {
 		case <-time.After(backoff):
 			break
 		case <-stream.stopCh:
-			return
+			return nil
 		}
 		if stream.Logger != nil {
 			stream.Logger.Printf("Reconnecting in %0.4f secs\n", backoff.Seconds())
 		}
 
-		// NOTE: because of the defer we're opening the new connection
-		// before closing the old one. Shouldn't be a problem in practice,
-		// but something to be aware of.
 		next, err := stream.connect()
 		if err == nil {
-			go stream.stream(next)
-			break
+			return next
 		}
 		stream.Errors <- err
 
