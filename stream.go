@@ -16,7 +16,7 @@ import (
 type Stream struct {
 	c           *http.Client
 	req         *http.Request
-	lastEventId string
+	lastEventID string
 	retry       time.Duration
 	stopCh      chan struct{}
 	// Events emits the events received by the stream
@@ -40,28 +40,28 @@ func (e SubscriptionError) Error() string {
 }
 
 // Subscribe to the Events emitted from the specified url.
-// If lastEventId is non-empty it will be sent to the server in case it can replay missed events.
-func Subscribe(url, lastEventId string) (*Stream, error) {
+// If lastEventID is non-empty it will be sent to the server in case it can replay missed events.
+func Subscribe(url, lastEventID string) (*Stream, error) {
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
-	return SubscribeWithRequest(lastEventId, req)
+	return SubscribeWithRequest(lastEventID, req)
 }
 
 // SubscribeWithRequest will take an http.Request to setup the stream, allowing custom headers
 // to be specified, authentication to be configured, etc.
-func SubscribeWithRequest(lastEventId string, request *http.Request) (*Stream, error) {
-	return SubscribeWith(lastEventId, http.DefaultClient, request)
+func SubscribeWithRequest(lastEventID string, request *http.Request) (*Stream, error) {
+	return SubscribeWith(lastEventID, http.DefaultClient, request)
 }
 
 // SubscribeWith takes a http client and request providing customization over both headers and
 // control over the http client settings (timeouts, tls, etc)
-func SubscribeWith(lastEventId string, client *http.Client, request *http.Request) (*Stream, error) {
+func SubscribeWith(lastEventID string, client *http.Client, request *http.Request) (*Stream, error) {
 	stream := &Stream{
 		c:           client,
 		req:         request,
-		lastEventId: lastEventId,
+		lastEventID: lastEventID,
 		stopCh:      make(chan struct{}),
 		retry:       (time.Millisecond * 1000),
 		Events:      make(chan Event),
@@ -99,18 +99,20 @@ func (stream *Stream) connect() (r io.ReadCloser, err error) {
 	var resp *http.Response
 	stream.req.Header.Set("Cache-Control", "no-cache")
 	stream.req.Header.Set("Accept", "text/event-stream")
-	if len(stream.lastEventId) > 0 {
-		stream.req.Header.Set("Last-Event-ID", stream.lastEventId)
+	if len(stream.lastEventID) > 0 {
+		stream.req.Header.Set("Last-Event-ID", stream.lastEventID)
 	}
 	if resp, err = stream.c.Do(stream.req); err != nil {
 		return
 	}
 	if resp.StatusCode != 200 {
 		message, _ := ioutil.ReadAll(resp.Body)
+		resp.Body.Close()
 		err = SubscriptionError{
 			Code:    resp.StatusCode,
 			Message: string(message),
 		}
+		return
 	}
 	r = resp.Body
 	return
@@ -140,14 +142,14 @@ func (stream *Stream) readFromStream(r io.ReadCloser) error {
 		evCh := make(chan Event, 1)
 		errCh := make(chan error, 1)
 
-		go func(evCh chan<- Event, errCh chan<- error) {
+		go func() {
 			ev, err := dec.Decode()
 			if err != nil {
 				errCh <- err
 				return
 			}
 			evCh <- ev
-		}(evCh, errCh)
+		}()
 
 		select {
 		case ev := <-evCh:
@@ -156,11 +158,17 @@ func (stream *Stream) readFromStream(r io.ReadCloser) error {
 				stream.retry = time.Duration(pub.Retry()) * time.Millisecond
 			}
 			if len(pub.Id()) > 0 {
-				stream.lastEventId = pub.Id()
+				stream.lastEventID = pub.Id()
 			}
-			stream.Events <- ev
+			select {
+			case stream.Events <- ev:
+			case <-stream.stopCh:
+			}
 		case err := <-errCh:
-			stream.Errors <- err
+			select {
+			case stream.Errors <- err:
+			case <-stream.stopCh:
+			}
 			// respond to all errors by reconnecting and trying again
 			return err
 		case <-stream.stopCh:
